@@ -1,0 +1,75 @@
+# MetaNode 后端配置文件
+
+Name: metanode
+Host: 0.0.0.0
+Port: 8888
+
+# 日志配置
+Log:
+  ServiceName: metanode
+  Mode: console
+  Level: info
+
+# MySQL 配置
+MySQL:
+  DataSource: root:password@tcp(127.0.0.1:3306)/metanode?charset=utf8mb4&parseTime=True&loc=Local
+
+# Redis 配置
+Redis:
+  Host: 127.0.0.1:6379
+  Type: node
+  Pass: ""
+
+# 以太坊配置
+Ethereum:
+  # RPC 节点地址
+  RpcUrl: http://127.0.0.1:8545
+  # 链 ID
+  ChainId: 1
+  # MetaNodeDealer 合约地址
+  DealerAddress: "0x..."
+# 私钥：须与链上 validOrderSender 一致，用于撮合成功后调用 Perpetual.trade。
+# 若同时承担资金费结算，还须被设为 fundingRateKeeper（或使用单独运维流程）。
+  PrivateKey: ""
+  # Gas 价格倍数（基于预估 gas 价格的倍数）
+  GasPriceMultiplier: 1.2
+  # 最大 Gas 限制
+  MaxGasLimit: 3000000
+
+# 永续合约市场配置
+Markets:
+  - Address: "0x..."
+    Name: "BTC-PERP"
+    PriceSource: "chainlink"
+  - Address: "0x..."
+    Name: "ETH-PERP"
+    PriceSource: "chainlink"
+
+# 撮合引擎配置
+MatchEngine:
+  # 撮合间隔（毫秒）
+  MatchInterval: 100
+  # 批量提交交易数量
+  BatchSize: 10
+  # 最大待处理订单数
+  MaxPendingOrders: 10000
+
+# 资金费率配置
+FundingRate:
+  # 结算间隔（秒）
+  SettleInterval: 28800  # 8小时
+  # 最大资金费率
+  MaxRate: "0.001"  # 0.1%
+
+# 清算机器人配置
+Liquidator:
+  # 检查间隔（秒）
+  CheckInterval: 10
+  # 是否启用
+  Enabled: true
+
+# Chainlink 预言机配置
+Chainlink:
+  BTC_USD: "0x..."
+  ETH_USD: "0x..."
+
