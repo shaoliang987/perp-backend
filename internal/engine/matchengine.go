@@ -133,14 +133,17 @@ func (e *MatchEngine) AddOrder(order *model.Order) {
 
 // matchLoop 撮合循环
 func (e *MatchEngine) matchLoop() {
+	logx.Infof("[MatchLoop] 撮合协程已启动，执行周期: %d ms", e.config.MatchInterval)
 	ticker := time.NewTicker(time.Duration(e.config.MatchInterval) * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-e.stopCh:
+			logx.Info("[MatchLoop] 收到停止信号，撮合协程退出")
 			return
 		case <-ticker.C:
+			// 开始新一轮撮合
 			e.match()
 		}
 	}
@@ -150,6 +153,12 @@ func (e *MatchEngine) matchLoop() {
 func (e *MatchEngine) match() {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+
+	// 如果整个引擎连一个订单簿都还没初始化（空系统状态）
+	if len(e.orderBooks) == 0 {
+		logx.Infof("[MatchLoop 心跳] 当前无任何活跃交易对(OrderBook为空)，等待订单注入...")
+		return
+	}
 
 	for _, orderBook := range e.orderBooks {
 		e.matchOrderBook(orderBook)
@@ -161,6 +170,12 @@ func (e *MatchEngine) matchOrderBook(book *OrderBook) {
 	book.mu.Lock()
 	defer book.mu.Unlock()
 
+	// 仅在有挂单时输出当前队列状态，避免空轮询刷屏
+	if len(book.BuyOrders) > 0 || len(book.SellOrders) > 0 {
+		logx.Debugf("[MatchEngine] [%s] 开始撮合. 队列状态 -> 買单(Taker)数量: %d, 賣单(Maker)数量: %d",
+			book.Perp, len(book.BuyOrders), len(book.SellOrders))
+	}
+
 	for len(book.BuyOrders) > 0 && len(book.SellOrders) > 0 {
 		buyOrder := book.BuyOrders[0]
 		sellOrder := book.SellOrders[0]
@@ -169,6 +184,9 @@ func (e *MatchEngine) matchOrderBook(book *OrderBook) {
 		sellPrice := calculatePrice(sellOrder)
 
 		if buyPrice.Cmp(sellPrice) < 0 {
+			// 价格无法交叉，退出当前币对的撮合
+			logx.Debugf("[MatchEngine] [%s] 价格未交叉. 最高買价: %s, 最低賣价: %s. 结束本轮撮合.",
+				book.Perp, buyPrice.String(), sellPrice.String())
 			break
 		}
 
@@ -183,7 +201,10 @@ func (e *MatchEngine) matchOrderBook(book *OrderBook) {
 		} else {
 			matchAmount.Set(sellRem)
 		}
+
 		if matchAmount.Sign() == 0 {
+			logx.Errorf("[MatchEngine] [%s] 异常: 队列头部订单剩余量为0. 買单ID: %s, 賣单ID: %s.",
+				book.Perp, buyOrder.OrderId, sellOrder.OrderId)
 			break
 		}
 
@@ -194,6 +215,10 @@ func (e *MatchEngine) matchOrderBook(book *OrderBook) {
 			MatchPrice:  sellPrice.String(),
 		}
 
+		// 核心撮合成功日志 (INFO 级别)
+		logx.Infof("[✔ 撮合成功] [%s] 買单(Taker): %s | 賣单(Maker): %s | 撮合价: %s | 撮合数量: %s",
+			book.Perp, buyOrder.OrderId, sellOrder.OrderId, result.MatchPrice, result.MatchAmount)
+
 		e.tradeMu.Lock()
 		e.pendingTrades = append(e.pendingTrades, result)
 		e.tradeMu.Unlock()
@@ -201,13 +226,21 @@ func (e *MatchEngine) matchOrderBook(book *OrderBook) {
 		e.remMu.Lock()
 		e.remain[buyOrder.OrderId].Sub(e.remain[buyOrder.OrderId], matchAmount)
 		e.remain[sellOrder.OrderId].Sub(e.remain[sellOrder.OrderId], matchAmount)
+
 		if e.remain[buyOrder.OrderId].Sign() == 0 {
+			logx.Infof("[订单吃满] 買单完全成交并全额移出队列. ID: %s", buyOrder.OrderId)
 			book.BuyOrders = book.BuyOrders[1:]
 			delete(e.remain, buyOrder.OrderId)
+		} else {
+			logx.Debugf("[部分成交] 買单仍有剩余. ID: %s, 剩余量: %s", buyOrder.OrderId, e.remain[buyOrder.OrderId].String())
 		}
+
 		if e.remain[sellOrder.OrderId].Sign() == 0 {
+			logx.Infof("[订单吃满] 賣单完全成交并全额移出队列. ID: %s", sellOrder.OrderId)
 			book.SellOrders = book.SellOrders[1:]
 			delete(e.remain, sellOrder.OrderId)
+		} else {
+			logx.Debugf("[部分成交] 賣单仍有剩余. ID: %s, 剩余量: %s", sellOrder.OrderId, e.remain[sellOrder.OrderId].String())
 		}
 		e.remMu.Unlock()
 	}
@@ -215,12 +248,14 @@ func (e *MatchEngine) matchOrderBook(book *OrderBook) {
 
 // submitLoop 提交交易循环
 func (e *MatchEngine) submitLoop() {
+	logx.Info("[SubmitLoop] 链上结算提交协程已启动，执行周期: 1 秒")
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-e.stopCh:
+			logx.Info("[SubmitLoop] 收到停止信号，提交协程退出")
 			return
 		case <-ticker.C:
 			e.submitTrades()
@@ -257,45 +292,62 @@ func (e *MatchEngine) submitTrades() {
 // 注意：链上失败时仍会更新库表，生产环境可改为仅成功落库或回滚 remain（当前为简化实现）。
 func (e *MatchEngine) submitBatch(trades []*MatchResult) {
 	ctx := context.Background()
-	for _, trade := range trades {
+	logx.Infof("[SubmitBatch] 开始处理批量链上结算，本次批大小(BatchSize): %d", len(trades))
+
+	for i, trade := range trades {
 		matchAmt, ok := new(big.Int).SetString(trade.MatchAmount, 10)
 		if !ok {
-			logx.Errorf("bad match amount %s", trade.MatchAmount)
+			logx.Errorf("[SubmitBatch] 错误: 异常的成交数量 %s", trade.MatchAmount)
 			continue
 		}
 
 		var txHash string
 		var blockNum int64
+
 		if e.chain != nil {
+			logx.Infof("[SubmitBatch] [%d/%d] 正在构建链上数据... Taker: %s, Maker: %s", i+1, len(trades), trade.TakerOrder.OrderId, trade.MakerOrder.OrderId)
+
 			td, err := chain.BuildMatchTradeData(trade.TakerOrder, trade.MakerOrder, matchAmt)
 			if err != nil {
-				logx.Errorf("build trade data: %v", err)
+				logx.Errorf("[SubmitBatch] 构建 TradeData 失败: %v", err)
+				continue
+			}
+
+			perp := common.HexToAddress(trade.TakerOrder.Perp)
+
+			// 发送交易
+			logx.Infof("[SubmitBatch] 正在发送智能合约交易 SubmitPerpTrade -> 永续合约: %s", trade.TakerOrder.Perp)
+			tx, err := e.chain.SubmitPerpTrade(ctx, perp, td)
+			if err != nil {
+				logx.Errorf("[SubmitBatch] 链上 SubmitPerpTrade 交易发送失败: %v", err)
 			} else {
-				perp := common.HexToAddress(trade.TakerOrder.Perp)
-				tx, err := e.chain.SubmitPerpTrade(ctx, perp, td)
-				if err != nil {
-					logx.Errorf("SubmitPerpTrade failed: %v", err)
-				} else {
-					txHash = tx.Hash().Hex()
-					if rec, err := bind.WaitMined(ctx, e.chain.RPC(), tx); err == nil && rec != nil {
-						blockNum = int64(rec.BlockNumber.Uint64())
-						if rec.Status != 1 {
-							logx.Errorf("trade tx reverted: %s", txHash)
-						}
-					} else if err != nil {
-						logx.Errorf("WaitMined: %v", err)
+				txHash = tx.Hash().Hex()
+				logx.Infof("[⛓ 交易已发出] 哈希: %s, 等待区块打包确认 (WaitMined)...", txHash)
+
+				// 同步等待收据
+				if rec, err := bind.WaitMined(ctx, e.chain.RPC(), tx); err == nil && rec != nil {
+					blockNum = int64(rec.BlockNumber.Uint64())
+					if rec.Status == 1 {
+						logx.Infof("[★ 链上确认成功] 交易已被打包. 区块号: %d, TxHash: %s", blockNum, txHash)
+					} else {
+						logx.Errorf("[💥 链上执行 Revert] 交易打包但执行失败(Status=0). TxHash: %s", txHash)
 					}
+				} else if err != nil {
+					logx.Errorf("[SubmitBatch] 等待区块打包确认(WaitMined)时出错: %v", err)
 				}
 			}
 		} else {
-			logx.Info("Chain client nil, skip on-chain settle (dev mode)")
+			logx.Slowf("[SubmitBatch] (开发模式) Chain 客户端为 nil，跳过上链。仅模拟落库。")
 		}
 
+		// 更新订单状态及入库
+		logx.Infof("[DB] 正在更新订单状态与持久化 Trade 数据. TakerOrder: %s, MakerOrder: %s", trade.TakerOrder.OrderId, trade.MakerOrder.OrderId)
 		e.applyFillStatus(ctx, trade.TakerOrder.OrderId, trade.TakerOrder.PaperAmount, matchAmt.String())
 		e.applyFillStatus(ctx, trade.MakerOrder.OrderId, trade.MakerOrder.PaperAmount, matchAmt.String())
 
+		tradeID := generateTradeId()
 		if _, err := e.tradeModel.Insert(ctx, &model.Trade{
-			TradeId:      generateTradeId(),
+			TradeId:      tradeID,
 			Perp:         trade.TakerOrder.Perp,
 			TakerOrderId: trade.TakerOrder.OrderId,
 			MakerOrderId: trade.MakerOrder.OrderId,
@@ -307,7 +359,9 @@ func (e *MatchEngine) submitBatch(trades []*MatchResult) {
 			BlockNumber:  blockNum,
 			CreateTime:   time.Now(),
 		}); err != nil {
-			logx.Errorf("insert trade: %v", err)
+			logx.Errorf("[DB] 插入历史成交表失败: %v", err)
+		} else {
+			logx.Infof("[DB ✔] 成交流水本地落库成功. 流水号(TradeId): %s", tradeID)
 		}
 	}
 }

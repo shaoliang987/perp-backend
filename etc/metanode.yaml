@@ -2,14 +2,14 @@
 
 Name: metanode
 Host: 0.0.0.0
-Port: 8888
+Port: 28888
 
 # 日志配置
 Log:
   ServiceName: metanode
   Mode: console
-  Level: info
-
+  Level: debug
+  StackCooldownMillis: 100
 # MySQL 配置
 MySQL:
   DataSource: root:password@tcp(127.0.0.1:3306)/metanode?charset=utf8mb4&parseTime=True&loc=Local
@@ -23,14 +23,20 @@ Redis:
 # 以太坊配置
 Ethereum:
   # RPC 节点地址
-  RpcUrl: http://127.0.0.1:8545
+  # RpcUrl: http://127.0.0.1:8545
+  RpcUrl: https://ethereum-sepolia.publicnode.com
   # 链 ID
-  ChainId: 1
+  # ChainId: 1
+  ChainId: 11155111
   # MetaNodeDealer 合约地址
-  DealerAddress: "0x..."
+  DealerAddress: "0x62e738C8e807c5D8224044207ff7623F9e080Cd7"
+  # USDC（或与 Dealer primary 一致的 ERC20）合约地址：链上监听充值、Transfer→Deposit 关联时用。
+  UsdcAddress: "0xf3b23a25f2ef5cd41e35ec6b48f97397d0d85dc0"
+  # 平台 USDC 收款地址 address_a：用户向该地址转账 USDC，后端扫链入账 deposits + ledger_balances。
+  UsdcTreasuryAddress: "0x149F9754dB43Dda309a0B52a802D23F52e04F4F9"
 # 私钥：须与链上 validOrderSender 一致，用于撮合成功后调用 Perpetual.trade。
 # 若同时承担资金费结算，还须被设为 fundingRateKeeper（或使用单独运维流程）。
-  PrivateKey: ""
+  PrivateKey: "acbed0d94855fb055fe21b8848161fe7bd393042400928d3474d3755e8ed332a"
   # Gas 价格倍数（基于预估 gas 价格的倍数）
   GasPriceMultiplier: 1.2
   # 最大 Gas 限制
@@ -38,13 +44,20 @@ Ethereum:
 
 # 永续合约市场配置
 Markets:
-  - Address: "0x..."
+  - Address: "0x11Aae1f92Ff10bfbb205971e060CF6d9D917723b"
     Name: "BTC-PERP"
     PriceSource: "chainlink"
-  - Address: "0x..."
+    CoinbaseProduct: "BTC-USD"
+  - Address: "0x98456DCbcEfea550293727A7E2DfD45De92740c0"
     Name: "ETH-PERP"
     PriceSource: "chainlink"
-
+    CoinbaseProduct: "ETH-USD"
+# Coinbase 现货 ticker → 写 Supabase market_quotes → 前端 Realtime
+Coinbase:
+  Enabled: true
+  WsURL: "wss://ws-feed.exchange.coinbase.com"
+  ThrottleMs: 500
+  ReconnectSec: 5
 # 撮合引擎配置
 MatchEngine:
   # 撮合间隔（毫秒）
@@ -70,6 +83,25 @@ Liquidator:
 
 # Chainlink 预言机配置
 Chainlink:
-  BTC_USD: "0x..."
-  ETH_USD: "0x..."
+ BTC_USD: "0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43"
+ ETH_USD: "0x694AA1769357215DE4FAC081bf1f309aDC325306"
 
+# 监听 USDC → UsdcTreasuryAddress 的 Transfer，写入 MySQL deposits / ledger_balances（Redis 记扫描进度）。
+TreasuryDeposit:
+  Enabled: true
+  PollIntervalSeconds: 12
+  Confirmations: 1
+  InitialLookbackBlocks: 2000
+
+# 钱包签名登录（JWT HS256）
+Auth:
+  JwtSecret: "change-me-in-production"
+  JwtExpireHours: 168
+  NonceTTLMinutes: 15
+
+# Supabase Postgres（GORM 直连）。在 Dashboard → Database 复制 URI，务必 sslmode=require。
+# 勿把真实密码提交仓库；可仅用本地 yaml / 环境注入。
+Supabase:
+  DataSource: "postgresql://postgres:fRiWDteuoyqZPWu6@db.tnmhbgomjevaizaxmzuy.supabase.co:5432/postgres?sslmode=require"
+  MaxOpenConns: 20
+  MaxIdleConns: 6

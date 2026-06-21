@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/ethereum/go-ethereum v1.17.2
+	github.com/gorilla/websocket v1.5.3
 	github.com/zeromicro/go-zero v1.6.0
 )
 
@@ -32,7 +33,6 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
